@@ -98,6 +98,7 @@ var _NodeCloneNeedsRegeneration = Node(struct {
 	ComputedNameWithHost    string
 	DataPlaneAuditLogID     string
 	Expired                 bool
+	SelfNodeAddr            netip.Addr
 }{})
 
 // Clone makes a deep copy of Hostinfo.

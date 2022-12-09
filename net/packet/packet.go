@@ -440,6 +440,40 @@ func (q *Parsed) IsEchoResponse() bool {
 	}
 }
 
+// UpdateSrcAddr updates the source address in the packet buffer (e.g. during
+// SNAT). It also updates the checksum. Currently (2022-12-10) only TCP/UDP/ICMP
+// over IPv4 is supported. It panics if called with IPv6 addr.
+func (q *Parsed) UpdateSrcAddr(src netip.Addr) {
+	if q.IPVersion != 4 || src.Is6() {
+		panic("UpdateSrcAddr: only IPv4 is supported")
+	}
+
+	old := q.Src.Addr()
+	q.Src = netip.AddrPortFrom(src, q.Src.Port())
+
+	b := q.Buffer()
+	v4 := src.As4()
+	copy(b[12:16], v4[:])
+	updateV4PacketChecksums(q, old, src)
+}
+
+// UpdateDstAddr updates the source address in the packet buffer (e.g. during
+// DNAT). It also updates the checksum. Currently (2022-12-10) only TCP/UDP/ICMP
+// over IPv4 is supported. It panics if called with IPv6 addr.
+func (q *Parsed) UpdateDstAddr(dst netip.Addr) {
+	if q.IPVersion != 4 || dst.Is6() {
+		return
+	}
+
+	old := q.Dst.Addr()
+	q.Dst = netip.AddrPortFrom(dst, q.Dst.Port())
+
+	b := q.Buffer()
+	v4 := dst.As4()
+	copy(b[16:20], v4[:])
+	updateV4PacketChecksums(q, old, dst)
+}
+
 // EchoIDSeq extracts the identifier/sequence bytes from an ICMP Echo response,
 // and returns them as a uint32, used to lookup internally routed ICMP echo
 // responses. This function is intentionally lightweight as it is called on
@@ -501,4 +535,54 @@ func withIP(ap netip.AddrPort, ip netip.Addr) netip.AddrPort {
 
 func withPort(ap netip.AddrPort, port uint16) netip.AddrPort {
 	return netip.AddrPortFrom(ap.Addr(), port)
+}
+
+// updateV4PacketChecksums updates the checksums in the packet buffer.
+// Currently (2023-03-01) only TCP/UDP/ICMP over IPv4 is supported.
+// The packet is modified in place.
+func updateV4PacketChecksums(p *Parsed, old, new netip.Addr) {
+	o4, n4 := old.As4(), new.As4()
+	updateV4Checksum(p.Buffer()[10:12], o4[:], n4[:]) // header
+	switch p.IPProto {
+	case ipproto.UDP:
+		updateV4Checksum(p.Transport()[6:8], o4[:], n4[:])
+	case ipproto.TCP:
+		updateV4Checksum(p.Transport()[16:18], o4[:], n4[:])
+	case ipproto.ICMPv4:
+		// Nothing to do.
+	}
+	// TODO(maisem): more protocols (sctp, gre, dccp)
+}
+
+// updateV4Checksum calculates and updates the checksum in the packet buffer
+// for a change between old and new. The checksum is updated in place.
+func updateV4Checksum(oldSum, old, new []byte) {
+	if len(old) != len(new) {
+		panic("old and new must be the same length")
+	}
+	if len(old)%2 != 0 {
+		panic("old and new must be even length")
+	}
+	/*
+	   RFC 1071 Section 1.4
+	   Finally, one can sometimes avoid recomputing the entire checksum
+	   when one header field is updated.  The best-known example is a
+	   gateway changing the TTL field in the IP header, but there are
+	   other examples (for example, when updating a source route).  In
+	   these cases it is possible to update the checksum without
+	   scanning the message or datagram.
+
+	   To update the checksum, simply add the differences of the
+	   sixteen bit integers that have been changed.  To see why this
+	   works, observe that every 16-bit integer has an additive inverse
+	   and that addition is associative.  From this it follows that
+	   given the original value m, the new value m', and the old
+	*/
+
+	sum := ^binary.BigEndian.Uint16(oldSum)
+	for len(new) > 0 {
+		sum += binary.BigEndian.Uint16(new[:2]) - binary.BigEndian.Uint16(old[:2])
+		new, old = new[2:], old[2:]
+	}
+	binary.BigEndian.PutUint16(oldSum, ^sum)
 }
