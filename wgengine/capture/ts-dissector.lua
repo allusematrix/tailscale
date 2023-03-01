@@ -18,6 +18,8 @@ function tsdebug_ll.dissector(buffer, pinfo, tree)
     elseif path_id == 1 then subtree:add(PATH, "FromPeer")
     elseif path_id == 2 then subtree:add(PATH, "Synthesized (Inbound / ToLocal)")
     elseif path_id == 3 then subtree:add(PATH, "Synthesized (Outbound / ToPeer)")
+    elseif path_id == 4 then subtree:add(PATH, "SNAT")
+    elseif path_id == 5 then subtree:add(PATH, "DNAT")
     elseif path_id == 254 then subtree:add(PATH, "Disco frame")
     end
     offset = offset + 2

@@ -72,6 +72,10 @@ const (
 	// SynthesizedToPeer indicates the packet was generated from within tailscaled,
 	// and is being routed to a remote Wireguard peer.
 	SynthesizedToPeer Path = 3
+	// SNAT indicates the packet went through a SNAT operation.
+	SNAT Path = 4
+	// DNAT indicates the packet went through a DNAT operation.
+	DNAT Path = 5
 
 	// PathDisco indicates the packet is information about a disco frame.
 	PathDisco Path = 254

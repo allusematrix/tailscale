@@ -477,6 +477,9 @@ func (t *Wrapper) snatV4(p *packet.Parsed) {
 	newSrc := nc.selectSrcIP(oldSrc, p.Dst.Addr())
 	if oldSrc != newSrc {
 		p.UpdateSrcAddr(newSrc)
+		if capt := t.captureHook.Load(); capt != nil {
+			capt(capture.SNAT, time.Now(), p.Buffer())
+		}
 	}
 }
 
@@ -491,6 +494,9 @@ func (t *Wrapper) dnatV4(p *packet.Parsed) {
 	newDst := cfg.mapDstIP(oldDst)
 	if newDst != oldDst {
 		p.UpdateDstAddr(newDst)
+		if capt := t.captureHook.Load(); capt != nil {
+			capt(capture.DNAT, time.Now(), p.Buffer())
+		}
 	}
 }
 
@@ -707,15 +713,15 @@ func (t *Wrapper) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
 	defer parsedPacketPool.Put(p)
 	for _, data := range res.data {
 		p.Decode(data[res.dataOffset:])
+		if capt := t.captureHook.Load(); capt != nil {
+			capt(capture.FromLocal, time.Now(), data[res.dataOffset:])
+		}
 
 		t.snatV4(p)
 		if m := t.destIPActivity.Load(); m != nil {
 			if fn := m[p.Dst.Addr()]; fn != nil {
 				fn()
 			}
-		}
-		if capt := t.captureHook.Load(); capt != nil {
-			capt(capture.FromLocal, time.Now(), data[res.dataOffset:])
 		}
 		if !t.disableFilter {
 			response := t.filterOut(p)
@@ -782,10 +788,6 @@ func (t *Wrapper) injectedRead(res tunInjectedRead, buf []byte, offset int) (int
 
 func (t *Wrapper) filterIn(p *packet.Parsed) filter.Response {
 	// packet received from wireguard.
-	if capt := t.captureHook.Load(); capt != nil {
-		capt(capture.FromPeer, time.Now(), p.Buffer())
-	}
-
 	if p.IPProto == ipproto.TSMP {
 		if pingReq, ok := p.AsTSMPPing(); ok {
 			t.noteActivity()
@@ -887,6 +889,10 @@ func (t *Wrapper) Write(buffs [][]byte, offset int) (int, error) {
 	defer parsedPacketPool.Put(p)
 	for _, buff := range buffs {
 		p.Decode(buff[offset:])
+		if capt := t.captureHook.Load(); capt != nil {
+			capt(capture.FromPeer, time.Now(), p.Buffer())
+		}
+
 		t.dnatV4(p)
 		if !t.disableFilter {
 			if t.filterIn(p) != filter.Accept {
