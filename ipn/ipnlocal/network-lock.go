@@ -784,6 +784,64 @@ func (b *LocalBackend) NetworkLockLog(maxEntries int) ([]ipnstate.NetworkLockUpd
 	return out, nil
 }
 
+// NetworkLockAffectedSigs returns the signatures which would be invalidated
+// by removing trust in the specified KeyID.
+func (b *LocalBackend) NetworkLockAffectedSigs(keyID tkatype.KeyID) ([]tkatype.MarshaledSignature, error) {
+	var (
+		ourNodeKey key.NodePublic
+		err        error
+	)
+	b.mu.Lock()
+	if p := b.pm.CurrentPrefs(); p.Valid() && p.Persist().Valid() && !p.Persist().PrivateNodeKey().IsZero() {
+		ourNodeKey = p.Persist().PublicNodeKey()
+	}
+	if b.tka == nil {
+		err = errNetworkLockNotActive
+	}
+	b.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := b.tkaReadAffectedSigs(ourNodeKey, keyID)
+	if err != nil {
+		return nil, err
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.tka == nil {
+		return nil, errNetworkLockNotActive
+	}
+
+	// Confirm for ourselves tha the signatures would actually be invalidated
+	// by removal of trusted in the specified key.
+	for i, sigBytes := range resp.Signatures {
+		var sig tka.NodeKeySignature
+		if err := sig.Unserialize(sigBytes); err != nil {
+			return nil, fmt.Errorf("failed decoding signature %d: %w", i, err)
+		}
+
+		sigKeyID, err := sig.UnverifiedAuthorizingKeyID()
+		if err != nil {
+			return nil, fmt.Errorf("extracting SigID from signature %d: %w", i, err)
+		}
+		if !bytes.Equal(keyID, sigKeyID) {
+			return nil, fmt.Errorf("got signature with keyID %X from request for %X", sigKeyID, keyID)
+		}
+
+		var nodeKey key.NodePublic
+		if err := nodeKey.UnmarshalBinary(sig.Pubkey); err != nil {
+			return nil, fmt.Errorf("failed decoding pubkey for signature %d: %w", i, err)
+		}
+		if err := b.tka.authority.NodeKeyAuthorized(nodeKey, sigBytes); err != nil {
+			return nil, fmt.Errorf("signature %d is not valid: %w", i, err)
+		}
+	}
+
+	return resp.Signatures, nil
+}
+
 func signNodeKey(nodeInfo tailcfg.TKASignInfo, signer key.NLPrivate) (*tka.NodeKeySignature, error) {
 	p, err := nodeInfo.NodePublic.MarshalBinary()
 	if err != nil {
@@ -1102,6 +1160,42 @@ func (b *LocalBackend) tkaSubmitSignature(ourNodeKey key.NodePublic, sig tkatype
 		return nil, fmt.Errorf("request returned (%d): %s", res.StatusCode, string(body))
 	}
 	a := new(tailcfg.TKASubmitSignatureResponse)
+	err = json.NewDecoder(&io.LimitedReader{R: res.Body, N: 1024 * 1024}).Decode(a)
+	res.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("decoding JSON: %w", err)
+	}
+
+	return a, nil
+}
+
+func (b *LocalBackend) tkaReadAffectedSigs(ourNodeKey key.NodePublic, key tkatype.KeyID) (*tailcfg.TKASignaturesUsingKeyResponse, error) {
+	var req bytes.Buffer
+	if err := json.NewEncoder(&req).Encode(tailcfg.TKASignaturesUsingKeyRequest{
+		Version: tailcfg.CurrentCapabilityVersion,
+		NodeKey: ourNodeKey,
+		KeyID:   key,
+	}); err != nil {
+		return nil, fmt.Errorf("encoding request: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	req2, err := http.NewRequestWithContext(ctx, "GET", "https://unused/machine/tka/affected-sigs", &req)
+	if err != nil {
+		return nil, fmt.Errorf("req: %w", err)
+	}
+	res, err := b.DoNoiseRequest(req2)
+	if err != nil {
+		return nil, fmt.Errorf("resp: %w", err)
+	}
+	if res.StatusCode != 200 {
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		return nil, fmt.Errorf("request returned (%d): %s", res.StatusCode, string(body))
+	}
+	a := new(tailcfg.TKASignaturesUsingKeyResponse)
 	err = json.NewDecoder(&io.LimitedReader{R: res.Body, N: 1024 * 1024}).Decode(a)
 	res.Body.Close()
 	if err != nil {
