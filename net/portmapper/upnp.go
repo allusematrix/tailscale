@@ -279,7 +279,7 @@ func (c *Client) getUPnPPortMapping(
 		time.Second*pmpMapLifetimeSec,
 	)
 	if VerboseLogs {
-		c.logf("addAnyPortMapping: %v, %v", newPort, err)
+		c.logf("addAnyPortMapping: %v, err=%q", newPort, err)
 	}
 	if err != nil {
 		return netip.AddrPort{}, false

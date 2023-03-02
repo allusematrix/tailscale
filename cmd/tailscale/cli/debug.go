@@ -32,6 +32,7 @@ import (
 	"tailscale.com/control/controlhttp"
 	"tailscale.com/hostinfo"
 	"tailscale.com/ipn"
+	"tailscale.com/net/portmapper"
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/net/tshttpproxy"
 	"tailscale.com/paths"
@@ -41,6 +42,7 @@ import (
 	"tailscale.com/types/logger"
 	"tailscale.com/util/must"
 	"tailscale.com/wgengine/capture"
+	"tailscale.com/wgengine/monitor"
 )
 
 var debugCmd = &ffcli.Command{
@@ -198,6 +200,17 @@ var debugCmd = &ffcli.Command{
 			FlagSet: (func() *flag.FlagSet {
 				fs := newFlagSet("capture")
 				fs.StringVar(&captureArgs.outFile, "o", "", "path to stream the pcap (or - for stdout), leave empty to start wireshark")
+				return fs
+			})(),
+		},
+		{
+			Name:      "portmap",
+			Exec:      debugPortmap,
+			ShortHelp: "run portmap debugging debugging",
+			FlagSet: (func() *flag.FlagSet {
+				fs := newFlagSet("portmap")
+				fs.DurationVar(&debugPortmapArgs.duration, "duration", 5*time.Second, "timeout for port mapping")
+				fs.StringVar(&debugPortmapArgs.ty, "type", "", `portmap debug type (one of "", "pmp", "pcp", or "upnp")`)
 				return fs
 			})(),
 		},
@@ -788,4 +801,103 @@ func runCapture(ctx context.Context, args []string) error {
 	fmt.Fprintln(os.Stderr, "Press Ctrl-C to stop the capture.")
 	_, err = io.Copy(f, stream)
 	return err
+}
+
+var debugPortmapArgs struct {
+	duration time.Duration
+	ty       string
+}
+
+func debugPortmap(ctx context.Context, args []string) error {
+	ctx, cancel := context.WithTimeout(ctx, debugPortmapArgs.duration)
+	defer cancel()
+
+	portmapper.VerboseLogs = true
+	switch debugPortmapArgs.ty {
+	case "":
+	case "pmp":
+		portmapper.DisablePCP = true
+		portmapper.DisableUPnP = true
+	case "pcp":
+		portmapper.DisablePMP = true
+		portmapper.DisableUPnP = true
+	case "upnp":
+		portmapper.DisablePCP = true
+		portmapper.DisablePMP = true
+	default:
+		log.Fatalf("--type must be one of pmp,pcp,upnp")
+	}
+
+	done := make(chan bool, 1)
+
+	var c *portmapper.Client
+	logf := log.Printf
+	c = portmapper.NewClient(logger.WithPrefix(logf, "portmapper: "), func() {
+		logf("portmapping changed.")
+		logf("have mapping: %v", c.HaveMapping())
+
+		if ext, ok := c.GetCachedMappingOrStartCreatingOne(); ok {
+			logf("cb: mapping: %v", ext)
+			select {
+			case done <- true:
+			default:
+			}
+			return
+		}
+		logf("cb: no mapping")
+	})
+	linkMon, err := monitor.New(logger.WithPrefix(logf, "monitor: "))
+	if err != nil {
+		return err
+	}
+
+	gatewayAndSelfIP := func() (gw, self netip.Addr, ok bool) {
+		if v := os.Getenv("TS_DEBUG_GW_SELF"); strings.Contains(v, "/") {
+			i := strings.Index(v, "/")
+			gw = netip.MustParseAddr(v[:i])
+			self = netip.MustParseAddr(v[i+1:])
+			return gw, self, true
+		}
+		return linkMon.GatewayAndSelfIP()
+	}
+
+	c.SetGatewayLookupFunc(gatewayAndSelfIP)
+
+	gw, selfIP, ok := gatewayAndSelfIP()
+	if !ok {
+		logf("no gateway or self IP; %v", linkMon.InterfaceState())
+		return nil
+	}
+	logf("gw=%v; self=%v", gw, selfIP)
+
+	uc, err := net.ListenPacket("udp", "0.0.0.0:0")
+	if err != nil {
+		return err
+	}
+	defer uc.Close()
+	c.SetLocalPort(uint16(uc.LocalAddr().(*net.UDPAddr).Port))
+
+	res, err := c.Probe(ctx)
+	if err != nil {
+		return fmt.Errorf("Probe: %v", err)
+	}
+	logf("Probe: %+v", res)
+
+	if !res.PCP && !res.PMP && !res.UPnP {
+		logf("no portmapping services available")
+		return nil
+	}
+
+	if ext, ok := c.GetCachedMappingOrStartCreatingOne(); ok {
+		logf("mapping: %v", ext)
+	} else {
+		logf("no mapping")
+	}
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
