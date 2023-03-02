@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
@@ -39,6 +40,7 @@ var netlockCmd = &ffcli.Command{
 		nlDisablementKDFCmd,
 		nlLogCmd,
 		nlLocalDisableCmd,
+		nlTskeyWrapCmd,
 	},
 	Exec: runNetworkLockStatus,
 }
@@ -556,5 +558,50 @@ func runNetworkLockLog(ctx context.Context, args []string) error {
 		}
 		fmt.Fprintln(stdOut, stanza)
 	}
+	return nil
+}
+
+var nlTskeyWrapCmd = &ffcli.Command{
+	Name:       "tskey-wrap",
+	ShortUsage: "tskey-wrap <tailscale pre-auth key>",
+	ShortHelp:  "Modifies a pre-auth key from the admin panel to work with tailnet lock",
+	LongHelp:   "Modifies a pre-auth key from the admin panel to work with tailnet lock",
+	Exec:       runTskeyWrapCmd,
+}
+
+func runTskeyWrapCmd(ctx context.Context, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: lock tskey-wrap <tailscale pre-auth key>")
+	}
+
+	st, err := localClient.StatusWithoutPeers(ctx)
+	if err != nil {
+		return fixTailscaledConnectError(err)
+	}
+
+	// Generate a separate tailnet-lock key just for the credential signature.
+	// We use the free-form meta strings to mark a little bit of metadata about this
+	// key.
+	priv := key.NewNLPrivate()
+	k := tka.Key{
+		Kind:   tka.Key25519,
+		Public: priv.Public().Verifier(),
+		Votes:  1,
+		Meta: map[string]string{
+			"purpose":            "pre-auth key",
+			"wrapper_stableid":   string(st.Self.ID),
+			"wrapper_createtime": fmt.Sprint(time.Now().Unix()),
+		},
+	}
+
+	wrapped, err := localClient.NetworkLockWrapPreauthKey(ctx, args[0], priv)
+	if err != nil {
+		return fmt.Errorf("wrapping failed: %w", err)
+	}
+	if err := localClient.NetworkLockModify(ctx, []tka.Key{k}, nil); err != nil {
+		return fmt.Errorf("add key failed: %w", err)
+	}
+
+	fmt.Println(wrapped)
 	return nil
 }
